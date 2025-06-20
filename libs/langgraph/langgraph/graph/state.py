@@ -86,7 +86,7 @@ from langgraph.utils.fields import (
 )
 from langgraph.utils.pydantic import create_model
 from langgraph.utils.runnable import coerce_to_runnable
-from langgraph.warnings import LangGraphDeprecatedSinceV10
+from langgraph.warnings import LangGraphDeprecatedSinceV05
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,7 @@ StateNode: TypeAlias = Union[
     _NodeWithConfigWriter[StateT_contra],
     _NodeWithConfigStore[StateT_contra],
     _NodeWithConfigWriterStore[StateT_contra],
+    Runnable[StateT_contra, Any],
 ]
 
 
@@ -261,7 +262,7 @@ class StateGraph(Generic[StateT, InputT, OutputT]):
         if (input_ := kwargs.get("input", UNSET)) is not UNSET:
             warnings.warn(
                 "`input` is deprecated and will be removed. Please use `input_schema` instead.",
-                category=LangGraphDeprecatedSinceV10,
+                category=LangGraphDeprecatedSinceV05,
                 stacklevel=2,
             )
             if input_schema is None:
@@ -270,7 +271,7 @@ class StateGraph(Generic[StateT, InputT, OutputT]):
         if (output := kwargs.get("output", UNSET)) is not UNSET:
             warnings.warn(
                 "`output` is deprecated and will be removed. Please use `output_schema` instead.",
-                category=LangGraphDeprecatedSinceV10,
+                category=LangGraphDeprecatedSinceV05,
                 stacklevel=2,
             )
             if output_schema is None:
@@ -436,7 +437,7 @@ class StateGraph(Generic[StateT, InputT, OutputT]):
         if (retry := kwargs.get("retry", UNSET)) is not UNSET:
             warnings.warn(
                 "`retry` is deprecated and will be removed. Please use `retry_policy` instead.",
-                category=LangGraphDeprecatedSinceV10,
+                category=LangGraphDeprecatedSinceV05,
             )
             if retry_policy is None:
                 retry_policy = retry  # type: ignore[assignment]
@@ -444,7 +445,7 @@ class StateGraph(Generic[StateT, InputT, OutputT]):
         if (input_ := kwargs.get("input", UNSET)) is not UNSET:
             warnings.warn(
                 "`input` is deprecated and will be removed. Please use `input_schema` instead.",
-                category=LangGraphDeprecatedSinceV10,
+                category=LangGraphDeprecatedSinceV05,
             )
             if input_schema is None:
                 input_schema = cast(Union[type[InputT], None], input_)
@@ -535,7 +536,7 @@ class StateGraph(Generic[StateT, InputT, OutputT]):
         if input_schema is not None:
             self._add_schema(input_schema)
         self.nodes[node] = StateNodeSpec(
-            coerce_to_runnable(action, name=node, trace=False),  # type: ignore
+            coerce_to_runnable(action, name=node, trace=False),
             metadata,
             input=input_schema or self.state_schema,
             retry_policy=retry_policy,
@@ -849,13 +850,6 @@ class StateGraph(Generic[StateT, InputT, OutputT]):
             builder=self,
             schema_to_mapper={},
             config_type=self.config_schema,
-            input_model=(
-                self.input_schema
-                if len(self.channels) > 1
-                and isclass(self.input_schema)
-                and issubclass(self.input_schema, BaseModel)
-                else None
-            ),
             nodes={},
             channels={
                 **self.channels,
@@ -996,20 +990,17 @@ class CompiledStateGraph(
             self.nodes[key] = PregelNode(
                 tags=[TAG_HIDDEN],
                 triggers=[START],
-                channels=[START],
+                channels=START,
                 writers=[ChannelWrite(write_entries)],
             )
         elif node is not None:
             input_schema = node.input if node else self.builder._state_schema
-            input_values = {k: k for k in self.builder.schemas[input_schema]}
-            is_single_input = len(input_values) == 1 and "__root__" in input_values
+            input_channels = list(self.builder.schemas[input_schema])
+            is_single_input = len(input_channels) == 1 and "__root__" in input_channels
             if input_schema in self.schema_to_mapper:
                 mapper = self.schema_to_mapper[input_schema]
             else:
-                mapper = _pick_mapper(
-                    list(input_values),
-                    input_schema,
-                )
+                mapper = _pick_mapper(input_channels, input_schema)
                 self.schema_to_mapper[input_schema] = mapper
 
             branch_channel = CHANNEL_BRANCH_TO.format(key)
@@ -1021,7 +1012,7 @@ class CompiledStateGraph(
             self.nodes[key] = PregelNode(
                 triggers=[branch_channel],
                 # read state keys and managed values
-                channels=(list(input_values) if is_single_input else input_values),
+                channels=("__root__" if is_single_input else input_channels),
                 # coerce state dict to schema class (eg. pydantic model)
                 mapper=mapper,
                 # publish to state keys
@@ -1111,6 +1102,7 @@ class CompiledStateGraph(
 
     def _migrate_checkpoint(self, checkpoint: Checkpoint) -> None:
         """Migrate a checkpoint to new channel layout."""
+        super()._migrate_checkpoint(checkpoint)
 
         values = checkpoint["channel_values"]
         versions = checkpoint["channel_versions"]
